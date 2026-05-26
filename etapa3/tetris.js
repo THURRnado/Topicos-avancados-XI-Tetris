@@ -34,6 +34,9 @@ const LEVEL_SPEEDS = [800, 680, 560, 450, 350, 260, 190, 130, 90, 65, 50, 40, 30
 
 const LEVEL_UP_DURATION = 1400;
 
+// ms to display the game-over screen before returning to the title screen
+const GAME_OVER_REDIRECT_DELAY = 3000;
+
 // ms idle on title screen before attract mode starts
 const ATTRACT_DELAY = 10000;
 
@@ -439,6 +442,7 @@ let state = initialState();
 let lastTime = 0;
 let dropAccumulator = 0;
 let animationId = null;
+let gameOverTimeoutId = null;
 
 function dropInterval(level) {
   return LEVEL_SPEEDS[Math.min(level - 1, LEVEL_SPEEDS.length - 1)];
@@ -617,12 +621,24 @@ function hideOverlay() {
   overlayRecord.classList.add('hidden');
 }
 
+function clearGameOverTimeout() {
+  if (gameOverTimeoutId !== null) {
+    clearTimeout(gameOverTimeoutId);
+    gameOverTimeoutId = null;
+  }
+}
+
 function showGameOver() {
   const isNewRecord = state.score >= state.highScore && state.score > 0;
   const recordText = isNewRecord
     ? `★ NOVO RECORDE: ${state.highScore} ★`
     : `Recorde: ${state.highScore}`;
-  showOverlay('GAME OVER', 'Pressione Enter para reiniciar', recordText);
+  showOverlay('GAME OVER', 'Voltando à tela inicial...', recordText);
+  clearGameOverTimeout();
+  gameOverTimeoutId = setTimeout(() => {
+    gameOverTimeoutId = null;
+    backToTitle();
+  }, GAME_OVER_REDIRECT_DELAY);
 }
 
 // ─────────────────────────────────────────────
@@ -642,7 +658,8 @@ document.addEventListener('keydown', (e) => {
 
   // phase === 'playing'
   if (state.over) {
-    if (e.code === 'Enter') restartGame();
+    clearGameOverTimeout();
+    backToTitle();
     return;
   }
 
@@ -730,6 +747,7 @@ function startAttract() {
 }
 
 function backToTitle() {
+  clearGameOverTimeout();
   const prevHighScore = Math.max(state.highScore, loadHighScore());
   if (animationId) cancelAnimationFrame(animationId);
   state = initialState();

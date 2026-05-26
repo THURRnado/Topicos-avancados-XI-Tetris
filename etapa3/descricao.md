@@ -147,6 +147,32 @@ O nível sobe a cada 10 linhas eliminadas, aumentando a velocidade de queda.
 
 ---
 
+## Modificações adicionais — Redirecionamento ao game over
+
+### O que mudou
+
+Ao final de uma partida (`state.over === true`), o jogo agora retorna automaticamente à tela de abertura em vez de exibir um overlay estático aguardando o pressionamento de Enter.
+
+**Fluxo após o game over:**
+
+1. O overlay "GAME OVER" é exibido com o texto "Voltando à tela inicial..." e o recorde (novo recorde destacado quando aplicável).
+2. Após `GAME_OVER_REDIRECT_DELAY` (3 000 ms), `backToTitle()` é chamado automaticamente via `setTimeout`.
+3. Qualquer tecla pressionada durante os 3 segundos também chama `backToTitle()` imediatamente, cancelando o timeout.
+
+### Detalhes de implementação
+
+| Item | Descrição |
+| ---- | --------- |
+| `GAME_OVER_REDIRECT_DELAY` | Nova constante (3 000 ms): tempo de exibição do overlay antes do redirecionamento. |
+| `gameOverTimeoutId` | Variável de módulo que guarda o ID do `setTimeout`, permitindo cancelamento. |
+| `clearGameOverTimeout()` | Função auxiliar que cancela o timeout pendente; chamada em `backToTitle()` e no listener de `keydown`. |
+| `showGameOver()` | Atualizada: subtítulo passou de "Pressione Enter para reiniciar" para "Voltando à tela inicial..."; agenda o redirecionamento com `setTimeout`. |
+| Listener `keydown` (fase `playing`, `state.over`) | Antes aguardava `Enter` para chamar `restartGame()`; agora qualquer tecla cancela o timeout e chama `backToTitle()`. |
+| `backToTitle()` | Chama `clearGameOverTimeout()` no início para evitar redirecionamento duplicado. |
+| `index.html` — `#overlay-sub` | Texto padrão atualizado para "Voltando à tela inicial..." para consistência. |
+
+---
+
 ## Modificações em relação à Etapa 2
 
 ### Adicionado
