@@ -32,8 +32,12 @@ const PIECE_NAMES = Object.keys(PIECES);
 // Points awarded per number of lines cleared at once
 const LINE_POINTS = [0, 100, 300, 500, 800];
 
-// Drop interval (ms) per level
-const LEVEL_SPEEDS = [800, 720, 630, 550, 470, 380, 300, 220, 130, 100];
+// Drop interval (ms) per level — each entry corresponds to level index (0 = level 1).
+// Beyond the last entry the minimum speed (30 ms) is maintained.
+const LEVEL_SPEEDS = [800, 680, 560, 450, 350, 260, 190, 130, 90, 65, 50, 40, 30];
+
+// Duration (ms) the "NÍVEL UP!" banner stays visible on canvas
+const LEVEL_UP_DURATION = 1400;
 
 // ─────────────────────────────────────────────
 // Utility helpers
@@ -60,6 +64,18 @@ function rotateMatrix(matrix) {
     }
   }
   return result;
+}
+
+// ─────────────────────────────────────────────
+// High score persistence
+// ─────────────────────────────────────────────
+
+function loadHighScore() {
+  return parseInt(localStorage.getItem('tetrisHighScore') || '0', 10);
+}
+
+function saveHighScore(score) {
+  localStorage.setItem('tetrisHighScore', String(score));
 }
 
 // ─────────────────────────────────────────────
@@ -146,6 +162,7 @@ const boardCanvas = document.getElementById('board');
 const boardCtx = boardCanvas.getContext('2d');
 const nextCanvas = document.getElementById('next');
 const nextCtx = nextCanvas.getContext('2d');
+const levelEl = document.getElementById('level');
 
 function drawCell(ctx, x, y, color, size = CELL, alpha = 1) {
   ctx.globalAlpha = alpha;
@@ -212,6 +229,24 @@ function drawNextPiece(piece) {
   });
 }
 
+// Draws the "NÍVEL UP!" banner fading out on top of the board
+function drawLevelUpBanner(timer) {
+  if (timer <= 0) return;
+  // Fade out during the final 400 ms
+  const alpha = Math.min(1, timer / 400);
+  boardCtx.save();
+  boardCtx.globalAlpha = alpha;
+  boardCtx.font = 'bold 34px "Courier New"';
+  boardCtx.textAlign = 'center';
+  boardCtx.textBaseline = 'middle';
+  // Drop shadow for legibility
+  boardCtx.fillStyle = '#000';
+  boardCtx.fillText('NÍVEL UP!', boardCanvas.width / 2 + 2, boardCanvas.height / 2 + 2);
+  boardCtx.fillStyle = '#f0c040';
+  boardCtx.fillText('NÍVEL UP!', boardCanvas.width / 2, boardCanvas.height / 2);
+  boardCtx.restore();
+}
+
 function render(state) {
   drawGrid(boardCtx, state.board);
 
@@ -225,8 +260,10 @@ function render(state) {
   drawPiece(boardCtx, state.current, state.current.row);
 
   drawNextPiece(state.next);
+  drawLevelUpBanner(state.levelUpTimer);
 
   document.getElementById('score').textContent = state.score;
+  document.getElementById('high-score').textContent = state.highScore;
   document.getElementById('level').textContent = state.level;
   document.getElementById('lines').textContent = state.totalLines;
 }
@@ -241,10 +278,12 @@ function initialState() {
     current: createPiece(randomPieceName()),
     next: createPiece(randomPieceName()),
     score: 0,
+    highScore: loadHighScore(),
     level: 1,
     totalLines: 0,
     paused: false,
     over: false,
+    levelUpTimer: 0, // ms remaining to show the level-up banner
   };
 }
 
@@ -298,7 +337,20 @@ function lockCurrent(s) {
   s.board = newBoard;
   s.score += LINE_POINTS[linesCleared] * s.level;
   s.totalLines += linesCleared;
+
+  const oldLevel = s.level;
   s.level = Math.floor(s.totalLines / 10) + 1;
+
+  if (s.level > oldLevel) {
+    s.levelUpTimer = LEVEL_UP_DURATION;
+    triggerLevelFlash();
+  }
+
+  // Update live high score so it never shows less than the current score
+  if (s.score > s.highScore) {
+    s.highScore = s.score;
+    saveHighScore(s.highScore);
+  }
 
   // Top-out: blocks remain in the topmost visible row after line clearing
   if (newBoard[0].some(cell => cell !== null)) {
@@ -313,6 +365,14 @@ function lockCurrent(s) {
   if (!isValidPosition(s.board, s.current.matrix, s.current.row, s.current.col)) {
     s.over = true;
   }
+}
+
+// Triggers the CSS flash animation on the level counter
+function triggerLevelFlash() {
+  levelEl.classList.remove('flash');
+  // Force reflow so re-adding the class restarts the animation
+  void levelEl.offsetWidth;
+  levelEl.classList.add('flash');
 }
 
 // ─────────────────────────────────────────────
@@ -331,11 +391,16 @@ function gameLoop(timestamp) {
         lockCurrent(state);
       }
     }
+
+    if (state.levelUpTimer > 0) {
+      state.levelUpTimer = Math.max(0, state.levelUpTimer - delta);
+    }
+
     render(state);
   }
 
   if (state.over) {
-    showOverlay('GAME OVER', 'Pressione Enter para reiniciar');
+    showGameOver();
     return;
   }
 
@@ -349,15 +414,31 @@ function gameLoop(timestamp) {
 const overlay = document.getElementById('overlay');
 const overlayTitle = document.getElementById('overlay-title');
 const overlaySub = document.getElementById('overlay-sub');
+const overlayRecord = document.getElementById('overlay-record');
 
-function showOverlay(title, sub) {
+function showOverlay(title, sub, record = '') {
   overlayTitle.textContent = title;
   overlaySub.textContent = sub;
+  if (record) {
+    overlayRecord.textContent = record;
+    overlayRecord.classList.remove('hidden');
+  } else {
+    overlayRecord.classList.add('hidden');
+  }
   overlay.classList.remove('hidden');
 }
 
 function hideOverlay() {
   overlay.classList.add('hidden');
+  overlayRecord.classList.add('hidden');
+}
+
+function showGameOver() {
+  const isNewRecord = state.score >= state.highScore && state.score > 0;
+  const recordText = isNewRecord
+    ? `★ NOVO RECORDE: ${state.highScore} ★`
+    : `Recorde: ${state.highScore}`;
+  showOverlay('GAME OVER', 'Pressione Enter para reiniciar', recordText);
 }
 
 // ─────────────────────────────────────────────
@@ -418,8 +499,10 @@ function togglePause() {
 }
 
 function restartGame() {
+  const prevHighScore = Math.max(state.highScore, loadHighScore());
   if (animationId) cancelAnimationFrame(animationId);
   state = initialState();
+  state.highScore = prevHighScore;
   dropAccumulator = 0;
   lastTime = performance.now();
   hideOverlay();

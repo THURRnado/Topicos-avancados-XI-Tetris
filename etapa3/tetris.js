@@ -16,7 +16,6 @@ const COLORS = {
   L: '#e08020',
 };
 
-// Each piece defined as a 2-D matrix of its first rotation state
 const PIECES = {
   I: [[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]],
   O: [[1,1],[1,1]],
@@ -29,11 +28,17 @@ const PIECES = {
 
 const PIECE_NAMES = Object.keys(PIECES);
 
-// Points awarded per number of lines cleared at once
 const LINE_POINTS = [0, 100, 300, 500, 800];
 
-// Drop interval (ms) per level
-const LEVEL_SPEEDS = [800, 720, 630, 550, 470, 380, 300, 220, 130, 100];
+const LEVEL_SPEEDS = [800, 680, 560, 450, 350, 260, 190, 130, 90, 65, 50, 40, 30];
+
+const LEVEL_UP_DURATION = 1400;
+
+// ms idle on title screen before attract mode starts
+const ATTRACT_DELAY = 10000;
+
+// ms between AI input steps in attract mode
+const AI_MOVE_INTERVAL = 100;
 
 // ─────────────────────────────────────────────
 // Utility helpers
@@ -47,10 +52,6 @@ function cloneMatrix(matrix) {
   return matrix.map(row => [...row]);
 }
 
-/**
- * Rotates a 2-D matrix 90° clockwise.
- * Adding more rotation logic here won't affect game state.
- */
 function rotateMatrix(matrix) {
   const size = matrix.length;
   const result = Array.from({ length: size }, () => Array(size).fill(0));
@@ -63,13 +64,21 @@ function rotateMatrix(matrix) {
 }
 
 // ─────────────────────────────────────────────
+// High score persistence
+// ─────────────────────────────────────────────
+
+function loadHighScore() {
+  return parseInt(localStorage.getItem('tetrisHighScore') || '0', 10);
+}
+
+function saveHighScore(score) {
+  localStorage.setItem('tetrisHighScore', String(score));
+}
+
+// ─────────────────────────────────────────────
 // Board
 // ─────────────────────────────────────────────
 
-/**
- * The board is a 2-D array: board[row][col].
- * Empty cells hold null; filled cells hold a color string.
- */
 function createBoard() {
   return Array.from({ length: ROWS }, () => Array(COLS).fill(null));
 }
@@ -88,10 +97,6 @@ function isValidPosition(board, matrix, originRow, originCol) {
   return true;
 }
 
-/**
- * Locks the current piece into the board and returns
- * { newBoard, linesCleared }.
- */
 function lockPiece(board, matrix, originRow, originCol, color) {
   const newBoard = board.map(row => [...row]);
   for (let r = 0; r < matrix.length; r++) {
@@ -103,7 +108,6 @@ function lockPiece(board, matrix, originRow, originCol, color) {
     }
   }
 
-  // Clear full rows
   let linesCleared = 0;
   const clearedBoard = newBoard.filter(row => row.some(cell => !cell));
   linesCleared = ROWS - clearedBoard.length;
@@ -139,6 +143,99 @@ function ghostRow(board, piece) {
 }
 
 // ─────────────────────────────────────────────
+// Attract mode AI
+// ─────────────────────────────────────────────
+
+// Returns all unique rotation states of a piece starting from its current rotation.
+function aiGetRotations(piece) {
+  const rotations = [];
+  let matrix = cloneMatrix(piece.matrix);
+  for (let i = 0; i < 4; i++) {
+    const key = JSON.stringify(matrix);
+    if (rotations.some(r => JSON.stringify(r) === key)) break;
+    rotations.push(cloneMatrix(matrix));
+    matrix = rotateMatrix(matrix);
+  }
+  return rotations;
+}
+
+// Scores a board state using the classic Dellacherie heuristic.
+function aiEvaluateBoard(board) {
+  const heights = Array(COLS).fill(0);
+  for (let c = 0; c < COLS; c++) {
+    for (let r = 0; r < ROWS; r++) {
+      if (board[r][c]) { heights[c] = ROWS - r; break; }
+    }
+  }
+
+  const aggregateHeight = heights.reduce((a, b) => a + b, 0);
+
+  let linesCleared = 0;
+  for (let r = 0; r < ROWS; r++) {
+    if (board[r].every(cell => cell !== null)) linesCleared++;
+  }
+
+  let holes = 0;
+  for (let c = 0; c < COLS; c++) {
+    let blocked = false;
+    for (let r = 0; r < ROWS; r++) {
+      if (board[r][c]) blocked = true;
+      else if (blocked) holes++;
+    }
+  }
+
+  let bumpiness = 0;
+  for (let c = 0; c < COLS - 1; c++) {
+    bumpiness += Math.abs(heights[c] - heights[c + 1]);
+  }
+
+  return -0.510066 * aggregateHeight
+       + 0.760666 * linesCleared
+       - 0.356630 * holes
+       - 0.184483 * bumpiness;
+}
+
+// Finds the best (col, rotation) for the current piece using brute-force evaluation.
+function aiFindBestMove(board, piece) {
+  let bestScore = -Infinity;
+  let bestCol = piece.col;
+  let bestMatrix = cloneMatrix(piece.matrix);
+
+  for (const matrix of aiGetRotations(piece)) {
+    for (let col = -1; col < COLS + 1; col++) {
+      if (!isValidPosition(board, matrix, piece.row, col)) continue;
+      let row = piece.row;
+      while (isValidPosition(board, matrix, row + 1, col)) row++;
+      const { newBoard } = lockPiece(board, matrix, row, col, piece.color);
+      const score = aiEvaluateBoard(newBoard);
+      if (score > bestScore) {
+        bestScore = score;
+        bestCol = col;
+        bestMatrix = cloneMatrix(matrix);
+      }
+    }
+  }
+
+  return { col: bestCol, matrix: bestMatrix };
+}
+
+// Applies one AI input step: rotate if needed, then move horizontally.
+function aiStep(s) {
+  if (!s.aiTarget) {
+    s.aiTarget = aiFindBestMove(s.board, s.current);
+  }
+  const { col: targetCol, matrix: targetMatrix } = s.aiTarget;
+
+  if (JSON.stringify(s.current.matrix) !== JSON.stringify(targetMatrix)) {
+    tryRotate(s);
+  } else if (s.current.col < targetCol) {
+    tryMove(s, 0, 1);
+  } else if (s.current.col > targetCol) {
+    tryMove(s, 0, -1);
+  }
+}
+
+// ─────────────────────────────────────────────
 // Rendering
 // ─────────────────────────────────────────────
 
@@ -146,25 +243,21 @@ const boardCanvas = document.getElementById('board');
 const boardCtx = boardCanvas.getContext('2d');
 const nextCanvas = document.getElementById('next');
 const nextCtx = nextCanvas.getContext('2d');
+const levelEl = document.getElementById('level');
 
 function drawCell(ctx, x, y, color, size = CELL, alpha = 1) {
   ctx.globalAlpha = alpha;
   ctx.fillStyle = color;
   ctx.fillRect(x + 1, y + 1, size - 2, size - 2);
-
-  // Highlight edge
   ctx.fillStyle = 'rgba(255,255,255,0.15)';
   ctx.fillRect(x + 1, y + 1, size - 2, 4);
   ctx.fillStyle = 'rgba(0,0,0,0.25)';
   ctx.fillRect(x + 1, y + size - 5, size - 2, 4);
-
   ctx.globalAlpha = 1;
 }
 
 function drawGrid(ctx, board) {
   ctx.clearRect(0, 0, boardCanvas.width, boardCanvas.height);
-
-  // Subtle grid lines
   ctx.strokeStyle = 'rgba(255,255,255,0.03)';
   ctx.lineWidth = 1;
   for (let r = 0; r < ROWS; r++) {
@@ -172,13 +265,9 @@ function drawGrid(ctx, board) {
       ctx.strokeRect(c * CELL, r * CELL, CELL, CELL);
     }
   }
-
-  // Locked cells
   for (let r = 0; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
-      if (board[r][c]) {
-        drawCell(ctx, c * CELL, r * CELL, board[r][c]);
-      }
+      if (board[r][c]) drawCell(ctx, c * CELL, r * CELL, board[r][c]);
     }
   }
 }
@@ -212,21 +301,113 @@ function drawNextPiece(piece) {
   });
 }
 
+function drawLevelUpBanner(timer) {
+  if (timer <= 0) return;
+  const alpha = Math.min(1, timer / 400);
+  boardCtx.save();
+  boardCtx.globalAlpha = alpha;
+  boardCtx.font = 'bold 34px "Courier New"';
+  boardCtx.textAlign = 'center';
+  boardCtx.textBaseline = 'middle';
+  boardCtx.fillStyle = '#000';
+  boardCtx.fillText('NÍVEL UP!', boardCanvas.width / 2 + 2, boardCanvas.height / 2 + 2);
+  boardCtx.fillStyle = '#f0c040';
+  boardCtx.fillText('NÍVEL UP!', boardCanvas.width / 2, boardCanvas.height / 2);
+  boardCtx.restore();
+}
+
+// Draws the title / waiting screen directly on the board canvas.
+function drawTitleScreen(state) {
+  const ctx = boardCtx;
+  const w = boardCanvas.width;
+  const h = boardCanvas.height;
+
+  // Background + grid
+  ctx.fillStyle = '#0d0d1a';
+  ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+  ctx.lineWidth = 1;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      ctx.strokeRect(c * CELL, r * CELL, CELL, CELL);
+    }
+  }
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Large title with drop shadow
+  ctx.font = 'bold 54px "Courier New"';
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillText('TETRIS', w / 2 + 3, h * 0.20 + 3);
+  ctx.fillStyle = '#e94560';
+  ctx.fillText('TETRIS', w / 2, h * 0.20);
+
+  // Best score (gold, only when non-zero)
+  if (state.highScore > 0) {
+    ctx.font = '13px "Courier New"';
+    ctx.fillStyle = '#f0c040';
+    ctx.fillText('RECORDE: ' + state.highScore, w / 2, h * 0.34);
+  }
+
+  // Controls reference
+  ctx.font = '12px "Courier New"';
+  ctx.fillStyle = '#888';
+  const lines = ['← →  Mover', ' ↑   Rotacionar', ' ↓   Descer', 'Espaço  Queda', ' P   Pausar'];
+  lines.forEach((line, i) => ctx.fillText(line, w / 2, h * 0.46 + i * 22));
+
+  // Blinking "press any key" prompt
+  if (Math.floor(Date.now() / 500) % 2 === 0) {
+    ctx.font = 'bold 13px "Courier New"';
+    ctx.fillStyle = '#eee';
+    ctx.fillText('PRESSIONE QUALQUER TECLA', w / 2, h * 0.79);
+    ctx.fillText('PARA INICIAR', w / 2, h * 0.84);
+  }
+
+  // Attract-mode countdown bar at the bottom edge
+  const pct = state.attractTimer / ATTRACT_DELAY;
+  ctx.fillStyle = '#0f3460';
+  ctx.fillRect(20, h - 16, w - 40, 5);
+  ctx.fillStyle = '#e94560';
+  ctx.fillRect(20, h - 16, (w - 40) * pct, 5);
+
+  // Clear next-piece canvas so it doesn't show stale data
+  nextCtx.clearRect(0, 0, nextCanvas.width, nextCanvas.height);
+}
+
+// Draws the attract-mode banner over the active game canvas.
+function drawAttractOverlay() {
+  const ctx = boardCtx;
+  const w = boardCanvas.width;
+
+  ctx.fillStyle = 'rgba(10,10,20,0.82)';
+  ctx.fillRect(0, 0, w, 46);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 15px "Courier New"';
+  ctx.fillStyle = '#f0c040';
+  ctx.fillText('MODO DEMONSTRAÇÃO', w / 2, 15);
+
+  ctx.font = '11px "Courier New"';
+  ctx.fillStyle = '#aaa';
+  ctx.fillText('Pressione qualquer tecla para jogar', w / 2, 33);
+}
+
 function render(state) {
   drawGrid(boardCtx, state.board);
 
-  // Ghost
   const gRow = ghostRow(state.board, state.current);
   if (gRow !== state.current.row) {
     drawPiece(boardCtx, state.current, gRow, 0.2);
   }
-
-  // Active piece
   drawPiece(boardCtx, state.current, state.current.row);
 
   drawNextPiece(state.next);
+  drawLevelUpBanner(state.levelUpTimer);
 
   document.getElementById('score').textContent = state.score;
+  document.getElementById('high-score').textContent = state.highScore;
   document.getElementById('level').textContent = state.level;
   document.getElementById('lines').textContent = state.totalLines;
 }
@@ -241,10 +422,16 @@ function initialState() {
     current: createPiece(randomPieceName()),
     next: createPiece(randomPieceName()),
     score: 0,
+    highScore: loadHighScore(),
     level: 1,
     totalLines: 0,
     paused: false,
     over: false,
+    levelUpTimer: 0,
+    phase: 'title',        // 'title' | 'playing' | 'attract'
+    attractTimer: 0,       // ms elapsed on the title screen
+    aiTarget: null,        // { col, matrix } set once per piece in attract mode
+    aiMoveAccumulator: 0,  // ms since last AI step
   };
 }
 
@@ -272,7 +459,6 @@ function tryMove(s, dRow, dCol) {
 
 function tryRotate(s) {
   const rotated = rotateMatrix(s.current.matrix);
-  // Wall-kick offsets to try
   const kicks = [0, -1, 1, -2, 2];
   for (const kick of kicks) {
     if (isValidPosition(s.board, rotated, s.current.row, s.current.col + kick)) {
@@ -287,7 +473,7 @@ function hardDrop(s) {
   const gr = ghostRow(s.board, s.current);
   const dropped = gr - s.current.row;
   s.current.row = gr;
-  s.score += dropped * 2; // bonus for hard drop
+  s.score += dropped * 2;
   lockCurrent(s);
 }
 
@@ -298,9 +484,20 @@ function lockCurrent(s) {
   s.board = newBoard;
   s.score += LINE_POINTS[linesCleared] * s.level;
   s.totalLines += linesCleared;
+
+  const oldLevel = s.level;
   s.level = Math.floor(s.totalLines / 10) + 1;
 
-  // Top-out: blocks remain in the topmost visible row after line clearing
+  if (s.level > oldLevel) {
+    s.levelUpTimer = LEVEL_UP_DURATION;
+    triggerLevelFlash();
+  }
+
+  if (s.score > s.highScore) {
+    s.highScore = s.score;
+    saveHighScore(s.highScore);
+  }
+
   if (newBoard[0].some(cell => cell !== null)) {
     s.over = true;
     return;
@@ -308,11 +505,17 @@ function lockCurrent(s) {
 
   s.current = s.next;
   s.next = createPiece(randomPieceName());
+  s.aiTarget = null; // reset so AI recalculates for the new piece
 
-  // Spawn collision → game over
   if (!isValidPosition(s.board, s.current.matrix, s.current.row, s.current.col)) {
     s.over = true;
   }
+}
+
+function triggerLevelFlash() {
+  levelEl.classList.remove('flash');
+  void levelEl.offsetWidth;
+  levelEl.classList.add('flash');
 }
 
 // ─────────────────────────────────────────────
@@ -320,22 +523,68 @@ function lockCurrent(s) {
 // ─────────────────────────────────────────────
 
 function gameLoop(timestamp) {
-  const delta = timestamp - lastTime;
+  // Cap delta to avoid spiral-of-death after tab suspension
+  const delta = Math.min(timestamp - lastTime, 100);
   lastTime = timestamp;
 
+  // ── Title screen ──
+  if (state.phase === 'title') {
+    state.attractTimer += delta;
+    if (state.attractTimer >= ATTRACT_DELAY) {
+      startAttract();
+    } else {
+      drawTitleScreen(state);
+      animationId = requestAnimationFrame(gameLoop);
+    }
+    return;
+  }
+
+  // ── Attract mode ──
+  if (state.phase === 'attract') {
+    if (state.over) {
+      startAttract();
+      return;
+    }
+
+    state.aiMoveAccumulator += delta;
+    if (state.aiMoveAccumulator >= AI_MOVE_INTERVAL) {
+      state.aiMoveAccumulator = 0;
+      aiStep(state);
+    }
+
+    dropAccumulator += delta;
+    if (dropAccumulator >= dropInterval(state.level)) {
+      dropAccumulator = 0;
+      if (!tryMove(state, 1, 0)) lockCurrent(state);
+    }
+
+    if (state.levelUpTimer > 0) {
+      state.levelUpTimer = Math.max(0, state.levelUpTimer - delta);
+    }
+
+    render(state);
+    drawAttractOverlay();
+    animationId = requestAnimationFrame(gameLoop);
+    return;
+  }
+
+  // ── Playing ──
   if (!state.paused && !state.over) {
     dropAccumulator += delta;
     if (dropAccumulator >= dropInterval(state.level)) {
       dropAccumulator = 0;
-      if (!tryMove(state, 1, 0)) {
-        lockCurrent(state);
-      }
+      if (!tryMove(state, 1, 0)) lockCurrent(state);
     }
+
+    if (state.levelUpTimer > 0) {
+      state.levelUpTimer = Math.max(0, state.levelUpTimer - delta);
+    }
+
     render(state);
   }
 
   if (state.over) {
-    showOverlay('GAME OVER', 'Pressione Enter para reiniciar');
+    showGameOver();
     return;
   }
 
@@ -349,15 +598,31 @@ function gameLoop(timestamp) {
 const overlay = document.getElementById('overlay');
 const overlayTitle = document.getElementById('overlay-title');
 const overlaySub = document.getElementById('overlay-sub');
+const overlayRecord = document.getElementById('overlay-record');
 
-function showOverlay(title, sub) {
+function showOverlay(title, sub, record = '') {
   overlayTitle.textContent = title;
   overlaySub.textContent = sub;
+  if (record) {
+    overlayRecord.textContent = record;
+    overlayRecord.classList.remove('hidden');
+  } else {
+    overlayRecord.classList.add('hidden');
+  }
   overlay.classList.remove('hidden');
 }
 
 function hideOverlay() {
   overlay.classList.add('hidden');
+  overlayRecord.classList.add('hidden');
+}
+
+function showGameOver() {
+  const isNewRecord = state.score >= state.highScore && state.score > 0;
+  const recordText = isNewRecord
+    ? `★ NOVO RECORDE: ${state.highScore} ★`
+    : `Recorde: ${state.highScore}`;
+  showOverlay('GAME OVER', 'Pressione Enter para reiniciar', recordText);
 }
 
 // ─────────────────────────────────────────────
@@ -365,6 +630,17 @@ function hideOverlay() {
 // ─────────────────────────────────────────────
 
 document.addEventListener('keydown', (e) => {
+  if (state.phase === 'title') {
+    startGame();
+    return;
+  }
+
+  if (state.phase === 'attract') {
+    backToTitle();
+    return;
+  }
+
+  // phase === 'playing'
   if (state.over) {
     if (e.code === 'Enter') restartGame();
     return;
@@ -401,12 +677,24 @@ document.addEventListener('keydown', (e) => {
   if (!state.paused && !state.over) render(state);
 });
 
+// Mouse click or touch also exits title / attract mode
+document.addEventListener('click', () => {
+  if (state.phase === 'title') startGame();
+  else if (state.phase === 'attract') backToTitle();
+});
+
+document.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (state.phase === 'title') startGame();
+  else if (state.phase === 'attract') backToTitle();
+}, { passive: false });
+
 // ─────────────────────────────────────────────
-// Pause / restart
+// Phase transitions
 // ─────────────────────────────────────────────
 
 function togglePause() {
-  if (state.over) return;
+  if (state.phase !== 'playing' || state.over) return;
   state.paused = !state.paused;
   if (state.paused) {
     showOverlay('PAUSADO', 'Pressione P para continuar');
@@ -417,9 +705,49 @@ function togglePause() {
   }
 }
 
-function restartGame() {
+function startGame() {
+  const prevHighScore = Math.max(state.highScore, loadHighScore());
   if (animationId) cancelAnimationFrame(animationId);
   state = initialState();
+  state.highScore = prevHighScore;
+  state.phase = 'playing';
+  dropAccumulator = 0;
+  lastTime = performance.now();
+  hideOverlay();
+  animationId = requestAnimationFrame(gameLoop);
+}
+
+function startAttract() {
+  const prevHighScore = Math.max(state.highScore, loadHighScore());
+  if (animationId) cancelAnimationFrame(animationId);
+  state = initialState();
+  state.highScore = prevHighScore;
+  state.phase = 'attract';
+  dropAccumulator = 0;
+  lastTime = performance.now();
+  hideOverlay();
+  animationId = requestAnimationFrame(gameLoop);
+}
+
+function backToTitle() {
+  const prevHighScore = Math.max(state.highScore, loadHighScore());
+  if (animationId) cancelAnimationFrame(animationId);
+  state = initialState();
+  state.highScore = prevHighScore;
+  state.phase = 'title';
+  state.attractTimer = 0;
+  dropAccumulator = 0;
+  lastTime = performance.now();
+  hideOverlay();
+  animationId = requestAnimationFrame(gameLoop);
+}
+
+function restartGame() {
+  const prevHighScore = Math.max(state.highScore, loadHighScore());
+  if (animationId) cancelAnimationFrame(animationId);
+  state = initialState();
+  state.highScore = prevHighScore;
+  state.phase = 'playing';
   dropAccumulator = 0;
   lastTime = performance.now();
   hideOverlay();
